@@ -1,12 +1,23 @@
 #! python3
+"""
+Run historical simulations of stock transactions to see the results of dollar
+cost averaging.
 
+Raw stock price and CPI data comes from Alphavantage.  At some point we could
+plug in other data sources.
+
+This script tries to work in current dollars.  We take historical values and
+adjust them to current dollars using a CPI deflator.  I'll use the term
+"nominal" to mean the value is the actual value at the date of the transaction.
+"""
+from enum import Enum
 from typing import Dict, Any
 from datetime import date, datetime
 import time
 import os
 from pickle import load, dump
 
-
+import argparse
 from requests import get
 
 
@@ -15,16 +26,126 @@ with open("api-key.txt") as fp:
 
 api_key.strip()
 
-#
-# String constants
-#
-CPI_TODAY_KEY = "cpi_today"
-DIVIDEND_KEY = "dividend"
-CLOSE_KEY = "close"
 
-# Get starting date for simulation, ten years ago.
-start_date = date(year=date.today().year - 10, month=date.today().month, day=1)
-end_date = date(year=date.today().year, month=date.today().month, day=1)
+class StockPrice:
+    """
+    Represensation of a stock price.  We save the date, high, low, and close for
+    the stock price over an interval (typically a month).
+
+    Prices can be retrieved in either current or nominal values.  Values are
+    stored in nominal values and adjusted for inflation to get current values.
+
+    We also store any dividends paid in the interval.
+    """
+
+    class PriceAdjustment(Enum):
+        CURRENT = 1
+        NOMINAL = 2
+
+    class Price(Enum):
+        OPEN = 1
+        CLOSE = 2
+        HIGH = 3
+        LOW = 4
+        DIVIDEND = 5
+        ADJUSTED_CLOSE = 6
+
+    def __init__(self, price_date: date, data: Dict):
+        """
+        Create instance from JSON Alphavantage blob.
+
+        date is the date the data represents.  We need this to inflate and
+        deflate values.
+
+        Extract fields from JSON blob and store as members.
+        """
+        self.date = price_date
+
+        self.prices = dict()
+        self.prices[StockPrice.Price.OPEN] = float(data["1. open"])
+        self.prices[StockPrice.Price.HIGH] = float(data["2. high"])
+        self.prices[StockPrice.Price.LOW] = float(data["3. low"])
+        self.prices[StockPrice.Price.CLOSE] = float(data["4. close"])
+        self.prices[StockPrice.Price.ADJUSTED_CLOSE] = float(data["5. adjusted close"])
+        self.prices[StockPrice.Price.DIVIDEND] = float(data["7. dividend amount"])
+
+    def get_price(
+        self, which: Price, inflation: PriceAdjustment = PriceAdjustment.CURRENT
+    ):
+        """
+        Get the open/high/low/close price of a stock in an interval, in either
+        nominal or current dollars.
+        """
+        price = self.prices[which]
+        if inflation == StockPrice.PriceAdjustment.CURRENT:
+            price = cpi_data.inflate(self.date, price)
+
+        return price
+
+
+class Inflation:
+    """
+    Manage data about inflation.  Convert between nominal and current dollars.
+    """
+
+    def __init__(self):
+        self.cpi_data = dict()
+        self.today = date(year=date.today().year, month=date.today().month, day=1)
+
+    def load_data(self, start_date: date) -> None:
+        """
+        Fetch data from source, parse, and fill in cpi_data dict.
+        """
+
+        # Get raw CPI data
+        url = construct_url("CPI", interval="monthly")
+        data = fetch_data(url, "cpi")
+
+        # First element of data["data"] list typically is the start of the
+        # previous month.  Save that as today's CPI value so we have a value for
+        # the current, partial month.
+        self.cpi_data[self.today] = float(data["data"][0]["value"])
+
+        #
+        # CPI data has element "data" which is a list of hashes.  We want a
+        # hash indexed by date with a float value.
+        #
+        for elt in data["data"]:
+            cpi_date = date_str_to_date(elt["date"])
+
+            if cpi_date < start_date:
+                continue
+
+            self.cpi_data[cpi_date] = float(elt["value"])
+
+    def inflate(self, past_date: date, past_value: float) -> float:
+        """
+        Given a nominal value on a date, return the value in current dollars.
+        """
+        today_cpi = self.cpi_data[self.today]
+
+        if past_date not in self.cpi_data:
+            print("Could not find CPI value for {orig_date}")
+            exit()
+
+        value_cpi = self.cpi_data[past_date]
+
+        return past_value * today_cpi / value_cpi
+
+    def deflate(self, past_date: date, current_value: float) -> float:
+        """
+        Given a value in current dollars, deflate it to what it would have been on
+        some past date.
+        """
+        today_cpi = self.cpi_data[self.today]
+
+        if past_date not in self.cpi_data:
+            print("Could not find CPI value for {past_date}")
+            exit()
+
+        past_cpi = self.cpi_data[past_date]
+
+        return current_value * past_cpi / today_cpi
 
 
 def construct_url(function="TIME_SERIES_MONTHLY_ADJUSTED", **kwargs) -> str:
@@ -82,66 +203,45 @@ def fetch_data(url: str, pickle_name: str) -> Any:
     return data
 
 
-cpi_data = dict()
+parser = argparse.ArgumentParser(
+    description="Simulate buying stocks with dollar cost averaging"
+)
+parser.add_argument(
+    "--duration", "-d", type=int, default=10, help="Number of years to simulate"
+)
+
+# Main program begins here
+parser.add_argument(
+    "--symbol",
+    "-s",
+    type=str,
+    dest="symbols",
+    action="extend",
+    nargs="+",
+    required=True,
+    help="Stock symbol to simulate",
+)
+
+parser.add_argument("--verbose", "-v", action="count", default=0)
+args = parser.parse_args()
+print(args)
+
+# Get starting date for simulation, ten years ago.
+start_date = date(
+    year=date.today().year - args.duration, month=date.today().month, day=1
+)
+end_date = date(year=date.today().year, month=date.today().month, day=1)
+
+cpi_data = Inflation()
+cpi_data.load_data(start_date)
 
 
-def load_cpi_data() -> None:
+def load_stock_values(symbol: str) -> Dict[date, StockPrice]:
     """
-    Load global cpi_data hash with relative price values.
+    Load prices and dividend data for a given stock.
 
-    Save the first value we get as today's adjustment value.
-    """
-
-    # Get raw CPI data
-    url = construct_url("CPI", interval="monthly")
-    data = fetch_data(url, "cpi")
-
-    # First element of data["data"] list is value as of today.
-    #
-    # Hang on to that as special entry in cpi_data hash
-    cpi_data[CPI_TODAY_KEY] = float(data["data"][0]["value"])
-
-    # Ensure today's month is included.  It's generally not because the month is
-    # not over.
-    cpi_data[end_date] = cpi_data[CPI_TODAY_KEY]
-
-    #
-    # CPI data has element "data" which is a list of hashes.  We want a
-    # hash indexed by date with a float value.
-    #
-    for elt in data["data"]:
-        cpi_date = date_str_to_date(elt["date"])
-
-        if cpi_date < start_date:
-            continue
-
-        value = float(elt["value"])
-
-        cpi_data[cpi_date] = value
-
-
-def inflation_adjust(orig_date: date, value: float) -> float:
-    """
-    Given a value on a date, return the value in current dollars.
-    """
-    today_cpi = cpi_data[CPI_TODAY_KEY]
-
-    if orig_date not in cpi_data:
-        print("Could not find CPI value for {orig_date}")
-        exit()
-
-    value_cpi = cpi_data[orig_date]
-
-    return value * today_cpi / value_cpi
-
-
-def load_symbol_values(symbol: str) -> Dict[str, Dict[str, float]]:
-    """
-    Load closing price and dividend data for a given stock.
-
-    Result will be a hash keyed by a YYYY-MM date string.  The value is a hash
-    with "close" and "dividend" values in nominal (that is, not adjusted for
-    inflation) values.
+    Result will be a hash keyed by a date.  The date will be the first day of an
+    interval, typically a month.
     """
     url = construct_url("TIME_SERIES_MONTHLY_ADJUSTED", symbol=symbol)
     data = fetch_data(url, symbol)
@@ -159,40 +259,52 @@ def load_symbol_values(symbol: str) -> Dict[str, Dict[str, float]]:
         if price_date < start_date:
             continue
 
-        close = float(v["5. adjusted close"])
-        dividend = float(v["7. dividend amount"])
-
-        prices[price_date] = {CLOSE_KEY: close, DIVIDEND_KEY: dividend}
+        prices[price_date] = StockPrice(price_date, v)
 
     return prices
 
 
-load_cpi_data()
-aapl_prices = load_symbol_values("AAPL")
+share_prices = dict()
+for symbol in args.symbols:
+    share_prices[symbol] = load_stock_values(symbol.upper())
 
 #
-# OK, now simulate buying one thousand current dollars of a
-# stock each month.  Adjust stock close price to current
-# dollars and buy shares.  Remember how many shares we have
-# so we can compute dividends.
+# Now simulate buying one thousand current dollars of a stock each month.
+# Adjust stock close price to current dollars and buy shares.  Remember how many
+# shares we have so we can compute dividends.
 #
-# When the stock pays a dividend, also convert to current
-# dollars, multiply by number of shares, and add to
-# accumulated dividends.
+# When the stock pays a dividend, also convert to current dollars, multiply by
+# number of shares, and add to accumulated dividends.
 #
-shares = 0
-dividends = 0
+for symbol in args.symbols:
+    shares = 0
+    dividends = 0
+    cost_basis = 0
 
-for buy_date in sorted(aapl_prices.keys()):
+    for buy_date in sorted(share_prices[symbol].keys()):
 
-    if aapl_prices[buy_date][DIVIDEND_KEY] > 0:
-        per_share_div = inflation_adjust(buy_date, aapl_prices[buy_date]["dividend"])
-        dividends += shares * per_share_div
+        dividend = share_prices[symbol][buy_date].get_price(StockPrice.Price.DIVIDEND)
+        dividends += shares * dividend
 
-    price = inflation_adjust(buy_date, aapl_prices[buy_date][CLOSE_KEY])
-    shares += 1000 / price
+        share_price = share_prices[symbol][buy_date].get_price(
+            StockPrice.Price.ADJUSTED_CLOSE
+        )
+        new_shares = 1000 / share_price
+        shares += new_shares
 
-share_value = shares * aapl_prices[end_date][CLOSE_KEY]
-print(
-    f"At end of simulation, bought {shares:,.0f} shares worth ${share_value:,.2f} and received ${dividends:,.2f} in dividends."
-)
+        new_basis = cpi_data.deflate(buy_date, 1000)
+        cost_basis += new_basis
+
+        if args.verbose > 0:
+            print(
+                f"On {buy_date} bought {new_shares:,.2f} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
+            )
+
+    share_value = shares * share_prices[symbol][end_date].get_price(
+        StockPrice.Price.CLOSE
+    )
+    print(f"At end of simulation from {start_date} to {end_date}")
+    print(f"\tBought: {shares:,.0f} shares of {symbol.upper()}")
+    print(f"\tPresent value: ${share_value:,.2f}")
+    print(f"\tCost basis: ${cost_basis:,.2f}")
+    print(f"\tDividends: ${dividends:,.2f}")
