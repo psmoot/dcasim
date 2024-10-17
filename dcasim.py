@@ -197,6 +197,11 @@ def fetch_data(url: str, pickle_name: str) -> Any:
         r = get(url, timeout=15)
         data = r.json()
 
+        if "Error Message" in data:
+            raise ValueError(
+                f"Error fetching data for {pickle_name}, {data['Error Message']}"
+            )
+
         with open(pickle_file_path, "wb") as pkl_fp:
             dump(data, pkl_fp)
 
@@ -242,15 +247,20 @@ cpi_data = Inflation()
 cpi_data.load_data(start_date)
 
 
-def load_stock_values(symbol: str) -> Dict[date, StockPrice]:
+def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     """
     Load prices and dividend data for a given stock.
 
     Result will be a hash keyed by a date.  The date will be the first day of an
     interval, typically a month.
     """
-    url = construct_url("TIME_SERIES_MONTHLY_ADJUSTED", symbol=symbol)
-    data = fetch_data(url, symbol)
+    url = construct_url("TIME_SERIES_MONTHLY_ADJUSTED", symbol=ticker_symbol)
+    data = fetch_data(url, ticker_symbol)
+
+    if "Monthly Adjusted Time Series" not in data:
+        print(f"Did not fetch data")
+        print(data)
+        exit()
 
     #
     # Raw JSON data has a lot of fields we don't need.  What we do
