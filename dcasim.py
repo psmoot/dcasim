@@ -259,8 +259,7 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
 
     if "Monthly Adjusted Time Series" not in data:
         print(f"Did not fetch data")
-        print(data)
-        exit()
+        raise RuntimeError(f"Did not fetch data for {ticker_symbol}, {data}")
 
     #
     # Raw JSON data has a lot of fields we don't need.  What we do
