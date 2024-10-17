@@ -223,8 +223,14 @@ parser.add_argument(
 )
 
 parser.add_argument("--verbose", "-v", action="count", default=0)
+
+parser.add_argument(
+    "--skill",
+    "-S",
+    choices=["best", "worst", "close"],
+    help="How skillful to pick prices: the best, worst, or closing price for the period",
+)
 args = parser.parse_args()
-print(args)
 
 # Get starting date for simulation, ten years ago.
 start_date = date(
@@ -286,9 +292,27 @@ for symbol in args.symbols:
         dividend = share_prices[symbol][buy_date].get_price(StockPrice.Price.DIVIDEND)
         dividends += shares * dividend
 
-        share_price = share_prices[symbol][buy_date].get_price(
-            StockPrice.Price.ADJUSTED_CLOSE
-        )
+        if args.skill == "close":
+            share_price = share_prices[symbol][buy_date].get_price(
+                StockPrice.Price.ADJUSTED_CLOSE
+            )
+        else:
+            # Figure out ratio of close to adjusted close, apply that ratio to
+            # either the high or low price to estimate the adjusted high or low.
+            # This isn't entirely accurate w.r.t. dividends.
+            ratio = share_prices[symbol][buy_date].get_price(
+                StockPrice.Price.ADJUSTED_CLOSE
+            ) / share_prices[symbol][buy_date].get_price(StockPrice.Price.CLOSE)
+            if args.skill == "best":
+                buy_price = share_prices[symbol][buy_date].get_price(
+                    StockPrice.Price.LOW
+                )
+            else:
+                buy_price = share_prices[symbol][buy_date].get_price(
+                    StockPrice.Price.HIGH
+                )
+            share_price = buy_price * ratio
+
         new_shares = 1000 / share_price
         shares += new_shares
 
