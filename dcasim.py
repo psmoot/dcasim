@@ -361,6 +361,16 @@ for symbol in args.symbols:
         ]
     )
 
+# Sort output by total gain.
+output.sort(key=lambda row: row[7], reverse=True)
+
+# Compute summary row
+summary = ["Total", start_date, end_date]
+for i in range(3, len(output[0])):
+    summary.append(sum([row[i] for row in output]))
+output.append(summary)
+
+
 print(f"At end of simulation from {start_date} to {end_date}")
 print(
     tabulate(
