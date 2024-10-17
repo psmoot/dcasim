@@ -19,6 +19,7 @@ from pickle import load, dump
 
 import argparse
 from requests import get
+from tabulate import tabulate
 
 
 with open("api-key.txt") as fp:
@@ -283,6 +284,9 @@ share_prices = dict()
 for symbol in args.symbols:
     share_prices[symbol] = load_stock_values(symbol.upper())
 
+# We'll use tabulate to print results from this list of lists.
+output = []
+
 #
 # Now simulate buying one thousand current dollars of a stock each month.
 # Adjust stock close price to current dollars and buy shares.  Remember how many
@@ -333,11 +337,44 @@ for symbol in args.symbols:
                 f"On {buy_date} bought {new_shares:,.2f} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
             )
 
-    share_value = shares * share_prices[symbol][end_date].get_price(
+    # Need first and last date we could have bought shares, which might not be
+    # start_date and end_date
+    first_buy_date = min(share_prices[symbol].keys())
+    last_buy_date = max(share_prices[symbol].keys())
+
+    share_value = shares * share_prices[symbol][last_buy_date].get_price(
         StockPrice.Price.CLOSE
     )
-    print(f"At end of simulation from {start_date} to {end_date}")
-    print(f"\tBought: {shares:,.0f} shares of {symbol.upper()}")
-    print(f"\tPresent value: ${share_value:,.2f}")
-    print(f"\tCost basis: ${cost_basis:,.2f}")
-    print(f"\tDividends: ${dividends:,.2f}")
+
+    gain = share_value + dividends - cost_basis
+
+    output.append(
+        [
+            symbol.upper(),
+            first_buy_date,
+            last_buy_date,
+            shares,
+            cost_basis,
+            share_value,
+            dividends,
+            gain,
+        ]
+    )
+
+print(f"At end of simulation from {start_date} to {end_date}")
+print(
+    tabulate(
+        output,
+        headers=[
+            "Stock",
+            "From",
+            "To",
+            "Shares",
+            "Basis",
+            "Present value",
+            "Dividends",
+            "Gain",
+        ],
+        floatfmt=",.2f",
+    )
+)
