@@ -358,16 +358,21 @@ for symbol in args.symbols:
             share_value,
             dividends,
             gain,
+            gain / cost_basis * 100,
         ]
     )
 
 # Sort output by total gain.
-output.sort(key=lambda row: row[7], reverse=True)
+output.sort(key=lambda row: row[8], reverse=True)
 
-# Compute summary row
+# Compute summary row.
 summary = ["Total", start_date, end_date]
 for i in range(3, len(output[0])):
     summary.append(sum([row[i] for row in output]))
+
+# Recompute summary gain.  It's not the sum of the gains for each stock.
+summary[8] = summary[7] / summary[4] * 100
+
 output.append(summary)
 
 
@@ -384,6 +389,7 @@ print(
             "Present value",
             "Dividends",
             "Gain",
+            "Gain (%)",
         ],
         floatfmt=",.2f",
     )
