@@ -11,21 +11,19 @@ adjust them to current dollars using a CPI deflator.  I'll use the term
 "nominal" to mean the value is the actual value at the date of the transaction.
 """
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import date, datetime
 import time
 import os
 from pickle import load, dump
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import argparse
 from requests import get
 from tabulate import tabulate
-
-
-with open("api-key.txt") as fp:
-    api_key = fp.readline()
-
-api_key.strip()
 
 
 class StockPrice:
@@ -82,6 +80,43 @@ class StockPrice:
             price = cpi_data.inflate(self.date, price)
 
         return price
+
+    def transaction_price(self):
+        """
+        Compute price to buy or sell based on skill level.
+
+        If you're the most skillfull, use the lowest buying price or highest sell price.
+
+        If you're least skillfull, use the reverse.
+
+        If you're lazy, just use the close price.
+        """
+        if args.skill == "close":
+            share_price = self.get_price(StockPrice.Price.ADJUSTED_CLOSE)
+        else:
+            # Figure out ratio of close to adjusted close, apply that ratio to
+            # either the high or low price to estimate the adjusted high or low.
+            # This isn't entirely accurate w.r.t. dividends.
+            ratio = self.get_price(StockPrice.Price.ADJUSTED_CLOSE) / self.get_price(
+                StockPrice.Price.CLOSE
+            )
+
+            # If we're a skilled buyer or unskilled seller, use the lowest price.
+            #
+            # If we're a skilled seller or unskilled buyer, use the highest price.
+            if (
+                args.skill == "best"
+                and args.buy
+                or args.skill == "worst"
+                and not args.buy
+            ):
+                price = self.get_price(StockPrice.Price.LOW)
+            else:
+                price = self.get_price(StockPrice.Price.HIGH)
+
+            share_price = price * ratio
+
+        return share_price
 
 
 class Inflation:
@@ -156,7 +191,7 @@ def construct_url(function="TIME_SERIES_MONTHLY_ADJUSTED", **kwargs) -> str:
 
     No doubt there's a library to make this safer but I can't find one.
     """
-    url = f"https://www.alphavantage.co/query?function={function}&apikey={api_key}"
+    url = f"https://www.alphavantage.co/query?function={function}"
     for name, value in kwargs.items():
         url += f"&{name}={value}"
 
@@ -191,14 +226,23 @@ def fetch_data(url: str, pickle_name: str) -> Any:
         age = ONE_MONTH_SECS + 1
 
     if os.path.exists(pickle_file_path) and age <= ONE_MONTH_SECS:
+        logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
         with open(pickle_file_path, "rb") as pkl_fp:
             data = load(pkl_fp)
     else:
+        logger.info(f"Loading data for {pickle_name} from {url}.")
         # No cached version, fetch and cache
+        with open("api-key.txt") as fp:
+            api_key = fp.readline()
+
+        api_key.strip()
+        url += f"&apikey={api_key}"
+
         r = get(url, timeout=15)
         data = r.json()
 
         if "Error Message" in data:
+            logger.error(f"Did not retrieve {pickle_name}, {data['Error Message']}")
             raise ValueError(
                 f"Error fetching data for {pickle_name}, {data['Error Message']}"
             )
@@ -229,6 +273,9 @@ parser.add_argument(
 )
 
 parser.add_argument("--verbose", "-v", action="count", default=0)
+
+parser.add_argument("--buy", action="store_true", default=True)
+parser.add_argument("--sell", action="store_false", dest="buy")
 
 parser.add_argument(
     "--skill",
@@ -280,51 +327,69 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     return prices
 
 
-share_prices = dict()
-for symbol in args.symbols:
-    share_prices[symbol] = load_stock_values(symbol.upper())
+def simulate(share_prices: Dict[date, StockPrice]) -> None:
+    """
+    Simulate buying or selling stock for all stocks in data set.
 
-# We'll use tabulate to print results from this list of lists.
-output = []
+    All calculations done in current dollars, except computing cost basis.
+    """
 
-#
-# Now simulate buying one thousand current dollars of a stock each month.
-# Adjust stock close price to current dollars and buy shares.  Remember how many
-# shares we have so we can compute dividends.
-#
-# When the stock pays a dividend, also convert to current dollars, multiply by
-# number of shares, and add to accumulated dividends.
-#
-for symbol in args.symbols:
+    # We'll use tabulate to print results from this list of lists.
+    output = []
+
+    for s in args.symbols:
+        if args.buy:
+            results = simulate_buying_stock(s, share_prices[s])
+        else:
+            results = simulate_selling_stock(s, share_prices[s])
+
+        output.append(results)
+
+    # Sort output by total gain.
+    output.sort(key=lambda row: row[8], reverse=True)
+
+    # Compute summary row.
+    summary = ["Total", start_date, end_date]
+    for i in range(3, len(output[0])):
+        summary.append(sum([row[i] for row in output]))
+
+    # Recompute summary gain.  It's not the sum of the gains for each stock.
+    if args.buy:
+        summary[8] = summary[7] / summary[4] * 100
+    else:
+        summary[8] = 0
+
+    output.append(summary)
+
+    return output
+
+
+def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
+    """
+    Simulate buying one stock.  Return list of results from the purchase.
+
+    Buy one thousand current dollars of a stock each month. Adjust stock close
+    price to current dollars and buy shares.  Remember how many shares we have
+    so we can compute dividends.
+
+    When the stock pays a dividend, also convert to current dollars, multiply by
+    number of shares, and add to accumulated dividends.
+    """
     shares = 0
     dividends = 0
     cost_basis = 0
 
-    for buy_date in sorted(share_prices[symbol].keys()):
+    # Need first and last date we could have bought shares, which might not be
+    # start_date and end_date
+    first_buy_date = min(prices.keys())
+    last_buy_date = max(prices.keys())
 
-        dividend = share_prices[symbol][buy_date].get_price(StockPrice.Price.DIVIDEND)
+    for buy_date in sorted(prices.keys()):
+
+        dividend = prices[buy_date].get_price(StockPrice.Price.DIVIDEND)
         dividends += shares * dividend
 
-        if args.skill == "close":
-            share_price = share_prices[symbol][buy_date].get_price(
-                StockPrice.Price.ADJUSTED_CLOSE
-            )
-        else:
-            # Figure out ratio of close to adjusted close, apply that ratio to
-            # either the high or low price to estimate the adjusted high or low.
-            # This isn't entirely accurate w.r.t. dividends.
-            ratio = share_prices[symbol][buy_date].get_price(
-                StockPrice.Price.ADJUSTED_CLOSE
-            ) / share_prices[symbol][buy_date].get_price(StockPrice.Price.CLOSE)
-            if args.skill == "best":
-                buy_price = share_prices[symbol][buy_date].get_price(
-                    StockPrice.Price.LOW
-                )
-            else:
-                buy_price = share_prices[symbol][buy_date].get_price(
-                    StockPrice.Price.HIGH
-                )
-            share_price = buy_price * ratio
+        share_price = prices[buy_date].transaction_price()
 
         new_shares = 1000 / share_price
         shares += new_shares
@@ -334,63 +399,117 @@ for symbol in args.symbols:
 
         if args.verbose > 0:
             print(
-                f"On {buy_date} bought {new_shares:,.2f} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
+                f"On {buy_date} bought {new_shares:,.2f} of {s} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
             )
+
+    # TODO: handle situation where we don't buy up to current price and there's
+    # inflation or a split between the last buy date and today.
+    end_share_value = shares * prices[last_buy_date].get_price(StockPrice.Price.CLOSE)
+
+    gain = end_share_value + dividends - cost_basis
+
+    return [
+        s.upper(),
+        first_buy_date,
+        last_buy_date,
+        shares,
+        cost_basis,
+        end_share_value,
+        dividends,
+        gain,
+        gain / cost_basis * 100,
+    ]
+
+
+def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
+    """
+    Simulate selling one stock.  Return list of results from the purchase.
+
+    Assume we start with $100,000 in the given stock.  Compute starting shares
+    and number of sell periods.  Sell an equal number of shares each period.
+
+    When the stock pays a dividend, convert that to current dollars, multiply
+    per-share dividend by number of shares we held at that point, and add to
+    accumulated dividends.
+    """
+    dividends = 0
+    cost_basis = 0
+    proceeds = 0
 
     # Need first and last date we could have bought shares, which might not be
     # start_date and end_date
-    first_buy_date = min(share_prices[symbol].keys())
-    last_buy_date = max(share_prices[symbol].keys())
+    first_sell_date = min(prices.keys())
+    last_sell_date = max(prices.keys())
 
-    share_value = shares * share_prices[symbol][last_buy_date].get_price(
-        StockPrice.Price.CLOSE
+    num_sales = len(prices)
+    start_shares = 100000 / prices[first_sell_date].get_price(
+        StockPrice.Price.ADJUSTED_CLOSE
+    )
+    shares_to_sell = start_shares / num_sales
+
+    shares = start_shares
+    for sell_date in sorted(prices.keys()):
+
+        dividend = prices[sell_date].get_price(StockPrice.Price.DIVIDEND)
+        dividends += shares * dividend
+
+        share_price = prices[sell_date].transaction_price()
+
+        sale_proceeds = share_price * shares_to_sell
+        proceeds += sale_proceeds
+        shares -= shares_to_sell
+
+        if args.verbose > 0:
+            print(
+                f"On {sell_date} sold {shares_to_sell:,.2f} of {s} for ${sale_proceeds:,.2f} at ${share_price:,.2f} per share."
+            )
+
+    return [
+        s.upper(),
+        first_sell_date,
+        last_sell_date,
+        start_shares,
+        0,
+        0,
+        dividends,
+        proceeds,
+        0,
+    ]
+
+
+def main() -> None:
+    share_prices = dict()
+    for symbol in args.symbols:
+        share_prices[symbol] = load_stock_values(symbol.upper())
+
+    output = simulate(share_prices)
+    print(
+        f"At end of {'buy' if args.buy else 'sell'} simulation from {start_date} to {end_date}"
+    )
+    print(
+        tabulate(
+            output,
+            headers=[
+                "Stock",
+                "From",
+                "To",
+                "Shares",
+                "Basis",
+                "Present value",
+                "Dividends",
+                "Gain",
+                "Gain (%)",
+            ],
+            floatfmt=",.2f",
+        )
     )
 
-    gain = share_value + dividends - cost_basis
 
-    output.append(
-        [
-            symbol.upper(),
-            first_buy_date,
-            last_buy_date,
-            shares,
-            cost_basis,
-            share_value,
-            dividends,
-            gain,
-            gain / cost_basis * 100,
-        ]
-    )
+if __name__ == "__main__":
+    logging.basicConfig()
+    if args.verbose == 1:
+        logger.setLevel(logging.INFO)
+    elif args.verbose >= 2:
+        logger.setLevel(logging.DEBUG)
 
-# Sort output by total gain.
-output.sort(key=lambda row: row[8], reverse=True)
-
-# Compute summary row.
-summary = ["Total", start_date, end_date]
-for i in range(3, len(output[0])):
-    summary.append(sum([row[i] for row in output]))
-
-# Recompute summary gain.  It's not the sum of the gains for each stock.
-summary[8] = summary[7] / summary[4] * 100
-
-output.append(summary)
-
-
-print(f"At end of simulation from {start_date} to {end_date}")
-print(
-    tabulate(
-        output,
-        headers=[
-            "Stock",
-            "From",
-            "To",
-            "Shares",
-            "Basis",
-            "Present value",
-            "Dividends",
-            "Gain",
-            "Gain (%)",
-        ],
-        floatfmt=",.2f",
-    )
-)
+    main()
