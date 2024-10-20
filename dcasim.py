@@ -1,7 +1,5 @@
 #! python3
-"""
-Run historical simulations of stock transactions to see the results of dollar
-cost averaging.
+"""Simulations of stock transactions to see the results of dollar cost averaging.
 
 Raw stock price and CPI data comes from Alphavantage.  At some point we could
 plug in other data sources.
@@ -10,26 +8,31 @@ This script tries to work in current dollars.  We take historical values and
 adjust them to current dollars using a CPI deflator.  I'll use the term
 "nominal" to mean the value is the actual value at the date of the transaction.
 """
-from enum import Enum
-from typing import Dict, Any, List
-from datetime import date, datetime
-import time
-import os
-from pickle import load, dump
 
-import logging
-
-logger = logging.getLogger(__name__)
+from __future__ import annotations
 
 import argparse
+import logging
+import os
+import sys
+import time
+from datetime import date, datetime
+from enum import Enum
+from pathlib import Path
+from pickle import dump, load
+from typing import Any, Dict, List
+
 from requests import get
 from tabulate import tabulate
 
+logger = logging.getLogger(__name__)
+
 
 class StockPrice:
-    """
-    Represensation of a stock price.  We save the date, high, low, and close for
-    the stock price over an interval (typically a month).
+    """Represensation of a stock price.
+
+    We save the date, high, low, and close for the stock price over an interval
+    (typically a month).
 
     Prices can be retrieved in either current or nominal values.  Values are
     stored in nominal values and adjusted for inflation to get current values.
@@ -38,10 +41,14 @@ class StockPrice:
     """
 
     class PriceAdjustment(Enum):
+        """How to adjust prices for inflation."""
+
         CURRENT = 1
         NOMINAL = 2
 
     class Price(Enum):
+        """What price to use for a given date."""
+
         OPEN = 1
         CLOSE = 2
         HIGH = 3
@@ -49,9 +56,8 @@ class StockPrice:
         DIVIDEND = 5
         ADJUSTED_CLOSE = 6
 
-    def __init__(self, price_date: date, data: Dict):
-        """
-        Create instance from JSON Alphavantage blob.
+    def __init__(self, price_date: date, data: dict[str, str]) -> None:
+        """Create instance from JSON Alphavantage blob.
 
         date is the date the data represents.  We need this to inflate and
         deflate values.
@@ -60,7 +66,7 @@ class StockPrice:
         """
         self.date = price_date
 
-        self.prices = dict()
+        self.prices = {}
         self.prices[StockPrice.Price.OPEN] = float(data["1. open"])
         self.prices[StockPrice.Price.HIGH] = float(data["2. high"])
         self.prices[StockPrice.Price.LOW] = float(data["3. low"])
@@ -70,10 +76,11 @@ class StockPrice:
 
     def get_price(
         self, which: Price, inflation: PriceAdjustment = PriceAdjustment.CURRENT
-    ):
-        """
-        Get the open/high/low/close price of a stock in an interval, in either
-        nominal or current dollars.
+    ) -> float:
+        """Get the open/high/low/close price of a stock.
+
+        All prices are relative to an interval, typically a month.  Values can
+        be returned in either nominal or current dollars.
         """
         price = self.prices[which]
         if inflation == StockPrice.PriceAdjustment.CURRENT:
@@ -81,11 +88,11 @@ class StockPrice:
 
         return price
 
-    def transaction_price(self):
-        """
-        Compute price to buy or sell based on skill level.
+    def transaction_price(self) -> float:
+        """Compute price to buy or sell based on skill level.
 
-        If you're the most skillfull, use the lowest buying price or highest sell price.
+        If you're the most skillfull, use the lowest buying price or highest
+        sell price.
 
         If you're least skillfull, use the reverse.
 
@@ -120,19 +127,15 @@ class StockPrice:
 
 
 class Inflation:
-    """
-    Manage data about inflation.  Convert between nominal and current dollars.
-    """
+    """Manage data about inflation.  Convert between nominal and current dollars."""
 
-    def __init__(self):
-        self.cpi_data = dict()
+    def __init__(self) -> None:
+        """Create new inflation entry for given time."""
+        self.cpi_data = {}
         self.today = date(year=date.today().year, month=date.today().month, day=1)
 
     def load_data(self, start_date: date) -> None:
-        """
-        Fetch data from source, parse, and fill in cpi_data dict.
-        """
-
+        """Fetch data from source, parse, and fill in cpi_data dict."""
         # Get raw CPI data
         url = construct_url("CPI", interval="monthly")
         data = fetch_data(url, "cpi")
@@ -155,39 +158,37 @@ class Inflation:
             self.cpi_data[cpi_date] = float(elt["value"])
 
     def inflate(self, past_date: date, past_value: float) -> float:
-        """
-        Given a nominal value on a date, return the value in current dollars.
-        """
+        """Given a nominal value on a date, return the value in current dollars."""
         today_cpi = self.cpi_data[self.today]
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
-            exit()
+            sys.exit()
 
         value_cpi = self.cpi_data[past_date]
 
         return past_value * today_cpi / value_cpi
 
     def deflate(self, past_date: date, current_value: float) -> float:
-        """
-        Given a value in current dollars, deflate it to what it would have been on
-        some past date.
-        """
+        """Deflate current dollars to nominal dollars on past date."""
         today_cpi = self.cpi_data[self.today]
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
-            exit()
+            sys.exit()
 
         past_cpi = self.cpi_data[past_date]
 
         return current_value * past_cpi / today_cpi
 
 
-def construct_url(function="TIME_SERIES_MONTHLY_ADJUSTED", **kwargs) -> str:
-    """
-    Construct URL.  Every URL needs a function paramter and many functions also
-    require additional parameters.
+def construct_url(
+    function: str = "TIME_SERIES_MONTHLY_ADJUSTED", **kwargs: dict[str, Any]
+) -> str:
+    """Construct URL of data source.
+
+    Every URL needs a function paramter and many functions also require
+    additional parameters.
 
     No doubt there's a library to make this safer but I can't find one.
     """
@@ -199,40 +200,43 @@ def construct_url(function="TIME_SERIES_MONTHLY_ADJUSTED", **kwargs) -> str:
 
 
 def date_str_to_date(date_str: str) -> date:
-    """
-    Take date string of the form "YYYY-MM-DD" and return date object for first
-    day of month.
+    """Convert date string of the form "YYYY-MM-DD" to date object.
 
-    For purposes of this script, we will ignore that CPI dates are from the
-    beginning of the month and most stock prices are from the end.
+    Returned dates are always for the first day of the month.  For purposes of
+    this script, we will ignore that CPI dates are from the beginning of the
+    month and most stock prices are from the end.  It's close enough.
     """
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")  # noqa: DTZ007
     return date(year=date_obj.year, month=date_obj.month, day=1)
 
 
-def fetch_data(url: str, pickle_name: str) -> Any:
-    """
-    Load data, either from a cached pickle file (if it exists) or by fetching a
-    URL.  We want to cache data to avoid API rate limits.
+ONE_MONTH_SECS = 3600 * 24 * 31
+
+
+def fetch_data(url: str, pickle_name: str) -> dict(str, str):
+    """Load data for a symbol.
+
+    Load from cached pickle file, if available and recent enough, to avoid API
+    rate limits.
 
     If we fetch data, save result to a pickle file for next time.
     """
-    pickle_file_path = f"./.cache/{pickle_name}.pkl"
+    pickle_file_path = Path(f"./.cache/{pickle_name}.pkl")
 
-    ONE_MONTH_SECS = 3600 * 24 * 31
-    if os.path.exists(pickle_file_path):
-        age = time.time() - os.path.getmtime(pickle_file_path)
-    else:
-        age = ONE_MONTH_SECS + 1
+    age = (
+        time.time() - Path.stat(pickle_file_path).st_mtime
+        if Path.exists(pickle_file_path)
+        else ONE_MONTH_SECS + 1
+    )
 
-    if os.path.exists(pickle_file_path) and age <= ONE_MONTH_SECS:
+    if Path.exists(pickle_file_path) and age <= ONE_MONTH_SECS:
         logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
-        with open(pickle_file_path, "rb") as pkl_fp:
-            data = load(pkl_fp)
+        with Path.open(pickle_file_path, "rb") as pkl_fp:
+            data = load(pkl_fp)  # noqa: S301
     else:
         logger.info(f"Loading data for {pickle_name} from {url}.")
         # No cached version, fetch and cache
-        with open("api-key.txt") as fp:
+        with Path.open("api-key.txt", encoding="utf-8") as fp:
             api_key = fp.readline()
 
         api_key.strip()
@@ -242,20 +246,18 @@ def fetch_data(url: str, pickle_name: str) -> Any:
         data = r.json()
 
         if "Error Message" in data:
-            logger.error(f"Did not retrieve {pickle_name}, {data['Error Message']}")
-            raise ValueError(
-                f"Error fetching data for {pickle_name}, {data['Error Message']}"
-            )
+            msg = f"Error fetching data for {pickle_name}, {data['Error Message']}"
+            logger.error(msg)
+            raise ValueError(msg)
 
-        with open(pickle_file_path, "wb") as pkl_fp:
+        with Path.open(pickle_file_path, "wb") as pkl_fp:
             dump(data, pkl_fp)
 
     return data
 
 
 def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
-    """
-    Load prices and dividend data for a given stock.
+    """Load prices and dividend data for a given stock.
 
     Result will be a hash keyed by a date.  The date will be the first day of an
     interval, typically a month.
@@ -274,7 +276,7 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     # month, adjusted for inflation to be in current dollars.  Dividend
     # is keyed by "7. dividend amount"
     #
-    prices = dict()
+    prices = {}
     for k, v in data["Monthly Adjusted Time Series"].items():
         price_date = date_str_to_date(k)
         if price_date < start_date:
@@ -285,13 +287,11 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     return prices
 
 
-def simulate(share_prices: Dict[date, StockPrice]) -> None:
-    """
-    Simulate buying or selling stock for all stocks in data set.
+def simulate(share_prices: dict[date, StockPrice]) -> None:
+    """Simulate buying or selling stock for all stocks in data set.
 
     All calculations done in current dollars, except computing cost basis.
     """
-
     # We'll use tabulate to print results from this list of lists.
     output = []
 
@@ -323,8 +323,7 @@ def simulate(share_prices: Dict[date, StockPrice]) -> None:
 
 
 def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
-    """
-    Simulate buying one stock.  Return list of results from the purchase.
+    """Simulate buying one stock.  Return list of results from the purchase.
 
     Buy one thousand current dollars of a stock each month. Adjust stock close
     price to current dollars and buy shares.  Remember how many shares we have
@@ -356,11 +355,11 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
         cost_basis += new_basis
 
         logger.info(
-            f"On {buy_date} bought {new_shares:,.2f} of {s} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
+            f"On {buy_date} bought {new_shares:,.2f} of {s} for ${new_basis:,.2f} at ${share_price:,.2f} per share.",
         )
 
-    # TODO: handle situation where we don't buy up to current price and there's
-    # inflation or a split between the last buy date and today.
+    # TODO(psmoot): handle situation where we don't buy up to current price and
+    # there's inflation or a split between the last buy date and today.
     end_share_value = shares * prices[last_buy_date].get_price(StockPrice.Price.CLOSE)
 
     gain = end_share_value + dividends - cost_basis
@@ -379,8 +378,7 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
 
 
 def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
-    """
-    Simulate selling one stock.  Return list of results from the purchase.
+    """Simulate selling one stock.  Return list of results from the purchase.
 
     Assume we start with $100,000 in the given stock.  Compute starting shares
     and number of sell periods.  Sell an equal number of shares each period.
@@ -390,7 +388,6 @@ def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     accumulated dividends.
     """
     dividends = 0
-    cost_basis = 0
     proceeds = 0
 
     # Need first and last date we could have bought shares, which might not be
@@ -434,9 +431,7 @@ def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
 
 
 def parse_args() -> None:
-    """
-    Parse command line arguments.  Leave results in global args variable.
-    """
+    """Parse command line arguments.  Leave results in global args variable."""
     parser = argparse.ArgumentParser(
         description="Simulate buying stocks with dollar cost averaging"
     )
@@ -477,8 +472,7 @@ def parse_args() -> None:
 
 
 def initialize_globals() -> None:
-    """
-    Set start_date and end_date variables based on --duration argument.
+    """Set start_date and end_date variables based on --duration argument.
 
     Load global cpi_data variable.
     """
@@ -496,11 +490,12 @@ def initialize_globals() -> None:
 
 
 def main() -> None:
+    """Main program for simulator."""  # noqa: D401
     parse_args()
 
     initialize_globals()
 
-    share_prices = dict()
+    share_prices = {}
     for symbol in args.symbols:
         share_prices[symbol] = load_stock_values(symbol.upper())
 
