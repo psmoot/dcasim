@@ -161,7 +161,7 @@ class Inflation:
         today_cpi = self.cpi_data[self.today]
 
         if past_date not in self.cpi_data:
-            print("Could not find CPI value for {orig_date}")
+            logger.error(f"Could not find CPI value for {past_date}")
             exit()
 
         value_cpi = self.cpi_data[past_date]
@@ -176,7 +176,7 @@ class Inflation:
         today_cpi = self.cpi_data[self.today]
 
         if past_date not in self.cpi_data:
-            print("Could not find CPI value for {past_date}")
+            logger.error(f"Could not find CPI value for {past_date}")
             exit()
 
         past_cpi = self.cpi_data[past_date]
@@ -253,48 +253,6 @@ def fetch_data(url: str, pickle_name: str) -> Any:
     return data
 
 
-parser = argparse.ArgumentParser(
-    description="Simulate buying stocks with dollar cost averaging"
-)
-parser.add_argument(
-    "--duration", "-d", type=int, default=10, help="Number of years to simulate"
-)
-
-# Main program begins here
-parser.add_argument(
-    "--symbol",
-    "-s",
-    type=str,
-    dest="symbols",
-    action="extend",
-    nargs="+",
-    required=True,
-    help="Stock symbol to simulate",
-)
-
-parser.add_argument("--verbose", "-v", action="count", default=0)
-
-parser.add_argument("--buy", action="store_true", default=True)
-parser.add_argument("--sell", action="store_false", dest="buy")
-
-parser.add_argument(
-    "--skill",
-    "-S",
-    choices=["best", "worst", "close"],
-    help="How skillful to pick prices: the best, worst, or closing price for the period",
-)
-args = parser.parse_args()
-
-# Get starting date for simulation, ten years ago.
-start_date = date(
-    year=date.today().year - args.duration, month=date.today().month, day=1
-)
-end_date = date(year=date.today().year, month=date.today().month, day=1)
-
-cpi_data = Inflation()
-cpi_data.load_data(start_date)
-
-
 def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     """
     Load prices and dividend data for a given stock.
@@ -306,7 +264,7 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     data = fetch_data(url, ticker_symbol)
 
     if "Monthly Adjusted Time Series" not in data:
-        print(f"Did not fetch data")
+        logger.error(f"Did not fetch data for {ticker_symbol}")
         raise RuntimeError(f"Did not fetch data for {ticker_symbol}, {data}")
 
     #
@@ -397,10 +355,9 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
         new_basis = cpi_data.deflate(buy_date, 1000)
         cost_basis += new_basis
 
-        if args.verbose > 0:
-            print(
-                f"On {buy_date} bought {new_shares:,.2f} of {s} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
-            )
+        logger.info(
+            f"On {buy_date} bought {new_shares:,.2f} of {s} for ${new_basis:,.2f} at ${share_price:,.2f} per share."
+        )
 
     # TODO: handle situation where we don't buy up to current price and there's
     # inflation or a split between the last buy date and today.
@@ -459,10 +416,9 @@ def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
         proceeds += sale_proceeds
         shares -= shares_to_sell
 
-        if args.verbose > 0:
-            print(
-                f"On {sell_date} sold {shares_to_sell:,.2f} of {s} for ${sale_proceeds:,.2f} at ${share_price:,.2f} per share."
-            )
+        logger.info(
+            f"On {sell_date} sold {shares_to_sell:,.2f} of {s} for ${sale_proceeds:,.2f} at ${share_price:,.2f} per share."
+        )
 
     return [
         s.upper(),
@@ -477,7 +433,73 @@ def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     ]
 
 
+def parse_args() -> None:
+    """
+    Parse command line arguments.  Leave results in global args variable.
+    """
+    parser = argparse.ArgumentParser(
+        description="Simulate buying stocks with dollar cost averaging"
+    )
+    parser.add_argument(
+        "--duration", "-d", type=int, default=10, help="Number of years to simulate"
+    )
+
+    # Main program begins here
+    parser.add_argument(
+        "--symbol",
+        "-s",
+        type=str,
+        dest="symbols",
+        action="extend",
+        nargs="+",
+        required=True,
+        help="Stock symbol to simulate",
+    )
+
+    parser.add_argument("--verbose", "-v", action="count", default=0)
+
+    parser.add_argument("--buy", action="store_true", default=True)
+    parser.add_argument("--sell", action="store_false", dest="buy")
+
+    parser.add_argument(
+        "--skill",
+        "-S",
+        choices=["best", "worst", "close"],
+        help="How skillful to pick prices: the best, worst, or closing price for the period",
+    )
+    global args
+    args = parser.parse_args()
+
+    if args.verbose == 1:
+        logger.setLevel(logging.INFO)
+    elif args.verbose >= 2:
+        logger.setLevel(logging.DEBUG)
+
+
+def initialize_globals() -> None:
+    """
+    Set start_date and end_date variables based on --duration argument.
+
+    Load global cpi_data variable.
+    """
+    # Set globals start_date and end_date, the beginning and end of simulation.
+    global start_date
+    start_date = date(
+        year=date.today().year - args.duration, month=date.today().month, day=1
+    )
+    global end_date
+    end_date = date(year=date.today().year, month=date.today().month, day=1)
+
+    global cpi_data
+    cpi_data = Inflation()
+    cpi_data.load_data(start_date)
+
+
 def main() -> None:
+    parse_args()
+
+    initialize_globals()
+
     share_prices = dict()
     for symbol in args.symbols:
         share_prices[symbol] = load_stock_values(symbol.upper())
@@ -507,9 +529,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig()
-    if args.verbose == 1:
-        logger.setLevel(logging.INFO)
-    elif args.verbose >= 2:
-        logger.setLevel(logging.DEBUG)
-
     main()
