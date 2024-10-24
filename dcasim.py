@@ -113,9 +113,9 @@ class StockPrice:
             # If we're a skilled seller or unskilled buyer, use the highest price.
             if (
                 args.skill == "best"
-                and args.buy
+                and args.action == "buy"
                 or args.skill == "worst"
-                and not args.buy
+                and args.action in ["sell-shares", "sell-value"]
             ):
                 price = self.get_price(StockPrice.Price.LOW)
             else:
@@ -163,7 +163,7 @@ class Inflation:
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
-            sys.exit()
+            sys.exit(1)
 
         value_cpi = self.cpi_data[past_date]
 
@@ -175,7 +175,7 @@ class Inflation:
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
-            sys.exit()
+            sys.exit(1)
 
         past_cpi = self.cpi_data[past_date]
 
@@ -223,11 +223,10 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
     """
     pickle_file_path = Path(f"./.cache/{pickle_name}.pkl")
 
-    age = (
-        time.time() - Path.stat(pickle_file_path).st_mtime
-        if Path.exists(pickle_file_path)
-        else ONE_MONTH_SECS + 1
-    )
+    if Path.exists(pickle_file_path):  # noqa: SIM108
+        age = time.time() - Path.stat(pickle_file_path).st_mtime
+    else:
+        age = ONE_MONTH_SECS + 1
 
     if Path.exists(pickle_file_path) and age <= ONE_MONTH_SECS:
         logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
@@ -296,10 +295,16 @@ def simulate(share_prices: dict[date, StockPrice]) -> None:
     output = []
 
     for s in args.symbols:
-        if args.buy:
+        if args.action == "buy":
             results = simulate_buying_stock(s, share_prices[s])
+        elif args.action == "sell" and args.shares:
+            results = simulate_selling_by_shares(s, share_prices[s])
+        elif args.action == "sell" and args.dollars is not None:
+            results = simulate_selling_constant_dollars(s, share_prices[s])
         else:
-            results = simulate_selling_stock(s, share_prices[s])
+            # Can't happen because parser won't allow it.
+            logger.error("Don't understand {args.action} action.")
+            sys.exit(1)
 
         output.append(results)
 
@@ -312,7 +317,7 @@ def simulate(share_prices: dict[date, StockPrice]) -> None:
         summary.append(sum([row[i] for row in output]))
 
     # Recompute summary gain.  It's not the sum of the gains for each stock.
-    if args.buy:
+    if args.action == "buy":
         summary[8] = summary[7] / summary[4] * 100
     else:
         summary[8] = 0
@@ -377,8 +382,10 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     ]
 
 
-def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
-    """Simulate selling one stock.  Return list of results from the purchase.
+def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
+    """Simulate selling one stock, selling same number of shares each time.
+
+    Return list of results from the purchase.
 
     Assume we start with $100,000 in the given stock.  Compute starting shares
     and number of sell periods.  Sell an equal number of shares each period.
@@ -430,6 +437,61 @@ def simulate_selling_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     ]
 
 
+def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) -> list:
+    """Simulate selling one stock, selling constant dollars.
+
+    Return list of results from the purchase.
+
+    Assume we start with $100,000 in the given stock.  Sell the same number of
+    dollars of stock until we either run out of months or shares.
+    """
+    dividends = 0
+    proceeds = 0
+
+    # Need first and last date we could have bought shares, which might not be
+    # start_date and end_date
+    first_sell_date = min(prices.keys())
+    last_sell_date = max(prices.keys())
+
+    start_shares = 100000 / prices[first_sell_date].get_price(
+        StockPrice.Price.ADJUSTED_CLOSE
+    )
+    shares = start_shares
+
+    for sell_date in sorted(prices.keys()):
+        dividend = prices[sell_date].get_price(StockPrice.Price.DIVIDEND)
+        dividends += shares * dividend
+
+        # Compute how many shares to sell.  If we have N periods left, sell
+        # 1/Nth of our shares.
+        share_price = prices[sell_date].transaction_price()
+        shares_to_sell = min(shares, args.dollars / share_price)
+
+        sale_proceeds = share_price * shares_to_sell
+        proceeds += sale_proceeds
+        shares -= shares_to_sell
+
+        logger.info(
+            f"On {sell_date} sold {shares_to_sell:,.2f} ({shares:,.2f} remaining) of {s} for ${sale_proceeds:,.2f} at ${share_price:,.2f} per share."
+        )
+
+        if shares <= 0.0:
+            last_sell_date = sell_date
+            break
+
+    return [
+        s.upper(),
+        first_sell_date,
+        last_sell_date,
+        start_shares,
+        0,
+        shares * prices[last_sell_date].transaction_price(),
+        dividends,
+        proceeds,
+        0,
+    ]
+
+
 def parse_args() -> None:
     """Parse command line arguments.  Leave results in global args variable."""
     parser = argparse.ArgumentParser(
@@ -453,8 +515,26 @@ def parse_args() -> None:
 
     parser.add_argument("--verbose", "-v", action="count", default=0)
 
-    parser.add_argument("--buy", action="store_true", default=True)
-    parser.add_argument("--sell", action="store_false", dest="buy")
+    parser.add_argument(
+        "--action",
+        "-a",
+        choices=["buy", "sell"],
+        help="Action to simulate: buying with DCA, selling constant number of shares, selling constant number of dollars",
+        default="buy",
+    )
+
+    parser.add_argument(
+        "--shares",
+        help="Sell fixed number of shares each month",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--dollars",
+        help="Dollars to sell each month (assuming starting value of $100,000)",
+        type=int,
+    )
 
     parser.add_argument(
         "--skill",
@@ -462,8 +542,17 @@ def parse_args() -> None:
         choices=["best", "worst", "close"],
         help="How skillful to pick prices: the best, worst, or closing price for the period",
     )
+
     global args
     args = parser.parse_args()
+
+    if args.action == "sell":
+        if not args.shares and args.dollars is None:
+            logger.error(f"Must specify either --shares or --dollars when selling.")
+            sys.exit(1)
+        elif args.shares and args.dollars is not None:
+            logger.error("Cannot sell both shares and dollars.")
+            sys.exit(1)
 
     if args.verbose == 1:
         logger.setLevel(logging.INFO)
@@ -500,9 +589,7 @@ def main() -> None:
         share_prices[symbol] = load_stock_values(symbol.upper())
 
     output = simulate(share_prices)
-    print(
-        f"At end of {'buy' if args.buy else 'sell'} simulation from {start_date} to {end_date}"
-    )
+    print(f"At end of {args.action} simulation from {start_date} to {end_date}")
     print(
         tabulate(
             output,
