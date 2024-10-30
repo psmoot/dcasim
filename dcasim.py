@@ -111,11 +111,8 @@ class StockPrice:
             # If we're a skilled buyer or unskilled seller, use the lowest price.
             #
             # If we're a skilled seller or unskilled buyer, use the highest price.
-            if (
-                args.skill == "best"
-                and args.action == "buy"
-                or args.skill == "worst"
-                and args.action in ["sell-shares", "sell-value"]
+            if (args.skill == "best" and args.action == "buy") or (
+                args.skill == "worst" and args.action == "sell"
             ):
                 price = self.get_price(StockPrice.Price.LOW)
             else:
@@ -311,18 +308,19 @@ def simulate(share_prices: dict[date, StockPrice]) -> None:
     # Sort output by total gain.
     output.sort(key=lambda row: row[8], reverse=True)
 
-    # Compute summary row.
-    summary = ["Total", start_date, end_date]
-    for i in range(3, len(output[0])):
-        summary.append(sum([row[i] for row in output]))
+    # Compute summary row if there's more than one stock.
+    if len(args.symbols) > 1:
+        summary = ["Total", start_date, end_date]
+        for i in range(3, len(output[0])):
+            summary.append(sum([row[i] for row in output]))
 
-    # Recompute summary gain.  It's not the sum of the gains for each stock.
-    if args.action == "buy":
-        summary[8] = summary[7] / summary[4] * 100
-    else:
-        summary[8] = 0
+        # Recompute summary gain.  It's not the sum of the gains for each stock.
+        if args.action == "buy":
+            summary[8] = summary[7] / summary[4] * 100
+        else:
+            summary[8] = 0
 
-    output.append(summary)
+        output.append(summary)
 
     return output
 
