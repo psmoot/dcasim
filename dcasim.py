@@ -220,19 +220,19 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
     """
     pickle_file_path = Path(f"./.cache/{pickle_name}.pkl")
 
-    if Path.exists(pickle_file_path):  # noqa: SIM108
-        age = time.time() - Path.stat(pickle_file_path).st_mtime
+    if pickle_file_path.exists():  # noqa: SIM108
+        age = time.time() - pickle_file_path.stat().st_mtime
     else:
         age = ONE_MONTH_SECS + 1
 
-    if Path.exists(pickle_file_path) and age <= ONE_MONTH_SECS:
+    if pickle_file_path.exists() and age <= ONE_MONTH_SECS:
         logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
-        with Path.open(pickle_file_path, "rb") as pkl_fp:
+        with pickle_file_path.open(mode="rb") as pkl_fp:
             data = load(pkl_fp)  # noqa: S301
     else:
         logger.info(f"Loading data for {pickle_name} from {url}.")
         # No cached version, fetch and cache
-        with Path.open("api-key.txt", encoding="utf-8") as fp:
+        with Path("api-key.txt").open() as fp:
             api_key = fp.readline()
 
         api_key.strip()
@@ -246,7 +246,15 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
             logger.error(msg)
             raise ValueError(msg)
 
-        with Path.open(pickle_file_path, "wb") as pkl_fp:
+        if (
+            "Information" in data
+            and "Our standard API rate limit" in data["Information"]
+        ):
+            msg = f"Exceeded rate limit fetching data for {pickle_name}, {data['Information']}."
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        with pickle_file_path.open(mode="wb") as pkl_fp:
             dump(data, pkl_fp)
 
     return data
