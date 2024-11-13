@@ -129,18 +129,16 @@ class Inflation:
     def __init__(self) -> None:
         """Create new inflation entry for given time."""
         self.cpi_data = {}
-        self.today = date(year=date.today().year, month=date.today().month, day=1)
+
+    def get_edge_dates(self) -> tuple[date, date]:
+        """Return the earliest and latest dates for which we have CPI data."""
+        return self.start_date, self.end_date
 
     def load_data(self, start_date: date) -> None:
         """Fetch data from source, parse, and fill in cpi_data dict."""
         # Get raw CPI data
         url = construct_url("CPI", interval="monthly")
         data = fetch_data(url, "cpi")
-
-        # First element of data["data"] list typically is the start of the
-        # previous month.  Save that as today's CPI value so we have a value for
-        # the current, partial month.
-        self.cpi_data[self.today] = float(data["data"][0]["value"])
 
         #
         # CPI data has element "data" which is a list of hashes.  We want a
@@ -154,9 +152,12 @@ class Inflation:
 
             self.cpi_data[cpi_date] = float(elt["value"])
 
+        self.start_date = min(self.cpi_data.keys())
+        self.end_date = max(self.cpi_data.keys())
+
     def inflate(self, past_date: date, past_value: float) -> float:
         """Given a nominal value on a date, return the value in current dollars."""
-        today_cpi = self.cpi_data[self.today]
+        today_cpi = self.cpi_data[self.end_date]
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
@@ -168,7 +169,7 @@ class Inflation:
 
     def deflate(self, past_date: date, current_value: float) -> float:
         """Deflate current dollars to nominal dollars on past date."""
-        today_cpi = self.cpi_data[self.today]
+        today_cpi = self.cpi_data[self.end_date]
 
         if past_date not in self.cpi_data:
             logger.error(f"Could not find CPI value for {past_date}")
@@ -184,7 +185,7 @@ def construct_url(
 ) -> str:
     """Construct URL of data source.
 
-    Every URL needs a function paramter and many functions also require
+    Every URL needs a function parameter and many functions also require
     additional parameters.
 
     No doubt there's a library to make this safer but I can't find one.
@@ -210,7 +211,11 @@ def date_str_to_date(date_str: str) -> date:
 ONE_MONTH_SECS = 3600 * 24 * 31
 
 
-def fetch_data(url: str, pickle_name: str) -> dict(str, str):
+# Remember if we hit the daily API limit.  If we have, only load cached data or fail.
+at_api_limit = False
+
+
+def fetch_data(url: str, pickle_name: str) -> dict[str, str]:
     """Load data for a symbol.
 
     Load from cached pickle file, if available and recent enough, to avoid API
@@ -219,6 +224,7 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
     If we fetch data, save result to a pickle file for next time.
     """
     pickle_file_path = Path(f"./.cache/{pickle_name}.pkl")
+    global at_api_limit
 
     if pickle_file_path.exists():  # noqa: SIM108
         age = time.time() - pickle_file_path.stat().st_mtime
@@ -229,8 +235,13 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
         logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
         with pickle_file_path.open(mode="rb") as pkl_fp:
             data = load(pkl_fp)  # noqa: S301
+    elif at_api_limit:
+        logger.info(
+            f"Not loading {pickle_name}, no cached data and at API limit for the day."
+        )
+        return None
     else:
-        logger.info(f"Loading data for {pickle_name} from {url}.")
+        logger.info(f"Fetching data for {pickle_name} from {url}.")
         # No cached version, fetch and cache
         with Path("api-key.txt").open() as fp:
             api_key = fp.readline()
@@ -250,9 +261,11 @@ def fetch_data(url: str, pickle_name: str) -> dict(str, str):
             "Information" in data
             and "Our standard API rate limit" in data["Information"]
         ):
-            msg = f"Exceeded rate limit fetching data for {pickle_name}, {data['Information']}."
-            logger.error(msg)
-            raise RuntimeError(msg)
+            logger.info(
+                f"Exceeded rate limit fetching data for {pickle_name}, {data['Information']}."
+            )
+            at_api_limit = True
+            return None
 
         with pickle_file_path.open(mode="wb") as pkl_fp:
             dump(data, pkl_fp)
@@ -268,6 +281,10 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     """
     url = construct_url("TIME_SERIES_MONTHLY_ADJUSTED", symbol=ticker_symbol)
     data = fetch_data(url, ticker_symbol)
+
+    # If data failed to load, just return None
+    if data is None:
+        return None
 
     if "Monthly Adjusted Time Series" not in data:
         logger.error(f"Did not fetch data for {ticker_symbol}")
@@ -299,7 +316,7 @@ def simulate(share_prices: dict[date, StockPrice]) -> None:
     # We'll use tabulate to print results from this list of lists.
     output = []
 
-    for s in args.symbols:
+    for s in share_prices:
         if args.action == "buy":
             results = simulate_buying_stock(s, share_prices[s])
         elif args.action == "sell" and args.shares:
@@ -343,16 +360,22 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     When the stock pays a dividend, also convert to current dollars, multiply by
     number of shares, and add to accumulated dividends.
     """
+    logger.info(f"Simulating buying {s}.")
+
     shares = 0
     dividends = 0
     cost_basis = 0
 
     # Need first and last date we could have bought shares, which might not be
-    # start_date and end_date
-    first_buy_date = min(prices.keys())
-    last_buy_date = max(prices.keys())
+    # start_date and end_date.  We need data for both CPI and stock prices for
+    # all dates.
+    cpi_start, cpi_end = cpi_data.get_edge_dates()
+    first_buy_date = max(cpi_start, min(prices.keys()))
+    last_buy_date = min(cpi_end, max(prices.keys()))
 
     for buy_date in sorted(prices.keys()):
+        if buy_date < cpi_start or buy_date > cpi_end:
+            continue
 
         dividend = prices[buy_date].get_price(StockPrice.Price.DIVIDEND)
         dividends += shares * dividend
@@ -404,9 +427,11 @@ def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
     proceeds = 0
 
     # Need first and last date we could have bought shares, which might not be
-    # start_date and end_date
-    first_sell_date = min(prices.keys())
-    last_sell_date = max(prices.keys())
+    # start_date and end_date.  We need both stock and CPI data for all dates.
+    cpi_start, cpi_end = cpi_data.get_edge_dates()
+
+    first_sell_date = max(cpi_start, min(prices.keys()))
+    last_sell_date = min(cpi_end, max(prices.keys()))
 
     num_sales = len(prices)
     start_shares = 100000 / prices[first_sell_date].get_price(
@@ -416,6 +441,8 @@ def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
 
     shares = start_shares
     for sell_date in sorted(prices.keys()):
+        if sell_date < cpi_start or sell_date > cpi_end:
+            continue
 
         dividend = prices[sell_date].get_price(StockPrice.Price.DIVIDEND)
         dividends += shares * dividend
@@ -455,9 +482,11 @@ def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) ->
     proceeds = 0
 
     # Need first and last date we could have bought shares, which might not be
-    # start_date and end_date
-    first_sell_date = min(prices.keys())
-    last_sell_date = max(prices.keys())
+    # start_date and end_date.  We need both stock and CPI data for all dates.
+    cpi_start, cpi_end = cpi_data.get_edge_dates()
+
+    first_sell_date = max(cpi_start, min(prices.keys()))
+    last_sell_date = min(cpi_end, max(prices.keys()))
 
     start_shares = 100000 / prices[first_sell_date].get_price(
         StockPrice.Price.ADJUSTED_CLOSE
@@ -465,6 +494,9 @@ def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) ->
     shares = start_shares
 
     for sell_date in sorted(prices.keys()):
+        if sell_date < cpi_start or sell_date > cpi_end:
+            continue
+
         dividend = prices[sell_date].get_price(StockPrice.Price.DIVIDEND)
         dividends += shares * dividend
 
@@ -576,12 +608,13 @@ def initialize_globals() -> None:
     start_date = date(
         year=date.today().year - args.duration, month=date.today().month, day=1
     )
-    global end_date
-    end_date = date(year=date.today().year, month=date.today().month, day=1)
 
     global cpi_data
     cpi_data = Inflation()
     cpi_data.load_data(start_date)
+
+    global end_date
+    end_date = date(year=date.today().year, month=date.today().month, day=1)
 
 
 def main() -> None:
@@ -592,7 +625,13 @@ def main() -> None:
 
     share_prices = {}
     for symbol in args.symbols:
-        share_prices[symbol] = load_stock_values(symbol.upper())
+        try:
+            prices = load_stock_values(symbol.upper())
+            if prices is not None:
+                share_prices[symbol] = prices
+        except ValueError:  # noqa: PERF203
+            logger.warning("Symbol {symbol} isn't a valid stock symbol, skipping.")
+            continue
 
     output = simulate(share_prices)
     print(f"At end of {args.action} simulation from {start_date} to {end_date}")
