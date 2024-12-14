@@ -249,25 +249,28 @@ def fetch_data(url: str, pickle_name: str) -> dict[str, str]:
         api_key.strip()
         url += f"&apikey={api_key}"
 
+        logger.debug(f"Fetching data from {url}")
         r = get(url, timeout=15)
         data = r.json()
+        logger.debug(f"Results are {data}")
 
         if "Error Message" in data:
             msg = f"Error fetching data for {pickle_name}, {data['Error Message']}"
             logger.error(msg)
-            raise ValueError(msg)
+            return None
 
         if (
             "Information" in data
             and "Our standard API rate limit" in data["Information"]
-        ):
-            logger.info(
+        ) or ("Note" in data and "Our standard API rate limit" in data["Note"]):
+            logger.warning(
                 f"Exceeded rate limit fetching data for {pickle_name}, {data['Information']}."
             )
             at_api_limit = True
             return None
 
         with pickle_file_path.open(mode="wb") as pkl_fp:
+            logger.debug(f"Saving results from query: {data}")
             dump(data, pkl_fp)
 
     return data
