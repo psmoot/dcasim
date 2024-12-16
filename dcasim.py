@@ -259,15 +259,16 @@ def fetch_data(url: str, pickle_name: str) -> dict[str, str]:
             logger.error(msg)
             return None
 
-        if (
-            "Information" in data
-            and "Our standard API rate limit" in data["Information"]
-        ) or ("Note" in data and "Our standard API rate limit" in data["Note"]):
-            logger.warning(
-                f"Exceeded rate limit fetching data for {pickle_name}, {data['Information']}."
-            )
-            at_api_limit = True
-            return None
+        # API rate limit warnings might be an element named "Note" or
+        # "Information" depending on whether this is the first or second time
+        # today we've hit the limit.
+        for err_tag in "Information", "Note":
+            if err_tag in data and "Our standard API rate limit" in data[err_tag]:
+                logger.warning(
+                    f"Exceeded rate limit fetching data for {pickle_name}, {data[err_tag]}."
+                )
+                at_api_limit = True
+                return None
 
         with pickle_file_path.open(mode="wb") as pkl_fp:
             logger.debug(f"Saving results from query: {data}")
