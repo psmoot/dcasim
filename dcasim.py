@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from pickle import dump, load
 from typing import Any, Dict, List
+from collections import namedtuple
 
 from requests import get
 from tabulate import tabulate
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class StockPrice:
-    """Represensation of a stock price.
+    """Representation of a stock price.
 
     We save the date, high, low, and close for the stock price over an interval
     (typically a month).
@@ -312,7 +313,34 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
     return prices
 
 
-def simulate(share_prices: dict[date, StockPrice]) -> None:
+SimResult = namedtuple(
+    "SimResult",
+    [
+        "symbol",
+        "first_buy_date",
+        "last_buy_date",
+        "shares",
+        "basis",
+        "end_share_value",
+        "dividends",
+        "gain",
+        "gain_pct",
+    ],
+    defaults=[
+        None,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ],
+)
+
+
+def simulate(share_prices: dict[date, StockPrice]) -> SimResult:
     """Simulate buying or selling stock for all stocks in data set.
 
     All calculations done in current dollars, except computing cost basis.
@@ -335,26 +363,23 @@ def simulate(share_prices: dict[date, StockPrice]) -> None:
         output.append(results)
 
     # Sort output by total gain.
-    output.sort(key=lambda row: row[8], reverse=True)
+    output.sort(key=lambda row: row.gain_pct, reverse=True)
 
     # Compute summary row if there's more than one stock.
     if len(args.symbols) > 1:
-        summary = ["Total", start_date, end_date]
+        summary_list = ["Total", start_date, end_date]
         for i in range(3, len(output[0])):
-            summary.append(sum([row[i] for row in output]))
+            summary_list.append(sum([row[i] for row in output]))
 
-        # Recompute summary gain.  It's not the sum of the gains for each stock.
-        if args.action == "buy":
-            summary[8] = summary[7] / summary[4] * 100
-        else:
-            summary[8] = 0
-
-        output.append(summary)
+        # It would be nice to use named fields here but a namedtuple has to be
+        # created all at once, it's immutable.
+        summary_list[8] = summary_list[7] / summary_list[4] * 100
+        output.append(SimResult._make(summary_list))
 
     return output
 
 
-def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
+def simulate_buying_stock(s: str, prices: dict[date, StockPrice]) -> list(SimResult):
     """Simulate buying one stock.  Return list of results from the purchase.
 
     Buy one thousand current dollars of a stock each month. Adjust stock close
@@ -366,9 +391,9 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
     """
     logger.info(f"Simulating buying {s}.")
 
-    shares = 0
-    dividends = 0
-    cost_basis = 0
+    shares = 0.0
+    dividends = 0.0
+    cost_basis = 0.0
 
     # Need first and last date we could have bought shares, which might not be
     # start_date and end_date.  We need data for both CPI and stock prices for
@@ -402,17 +427,17 @@ def simulate_buying_stock(s: str, prices: Dict[date, StockPrice]) -> List:
 
     gain = end_share_value + dividends - cost_basis
 
-    return [
-        s.upper(),
-        first_buy_date,
-        last_buy_date,
-        shares,
-        cost_basis,
-        end_share_value,
-        dividends,
-        gain,
-        gain / cost_basis * 100,
-    ]
+    return SimResult(
+        symbol=s.upper(),
+        first_buy_date=first_buy_date,
+        last_buy_date=last_buy_date,
+        shares=shares,
+        basis=cost_basis,
+        end_share_value=end_share_value,
+        dividends=dividends,
+        gain=gain,
+        gain_pct=gain / cost_basis * 100,
+    )
 
 
 def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
@@ -427,8 +452,8 @@ def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
     per-share dividend by number of shares we held at that point, and add to
     accumulated dividends.
     """
-    dividends = 0
-    proceeds = 0
+    dividends = 0.0
+    proceeds = 0.0
 
     # Need first and last date we could have bought shares, which might not be
     # start_date and end_date.  We need both stock and CPI data for all dates.
@@ -438,7 +463,8 @@ def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
     last_sell_date = min(cpi_end, max(prices.keys()))
 
     num_sales = len(prices)
-    start_shares = 100000 / prices[first_sell_date].get_price(
+    basis = 100000.0
+    start_shares = basis / prices[first_sell_date].get_price(
         StockPrice.Price.ADJUSTED_CLOSE
     )
     shares_to_sell = start_shares / num_sales
@@ -461,17 +487,17 @@ def simulate_selling_by_shares(s: str, prices: dict[date, StockPrice]) -> list:
             f"On {sell_date} sold {shares_to_sell:,.2f} of {s} for ${sale_proceeds:,.2f} at ${share_price:,.2f} per share."
         )
 
-    return [
-        s.upper(),
-        first_sell_date,
-        last_sell_date,
-        start_shares,
-        0,
-        0,
-        dividends,
-        proceeds,
-        0,
-    ]
+    return SimResult(
+        symbol=s.upper(),
+        first_buy_date=first_sell_date,
+        last_buy_date=last_sell_date,
+        shares=start_shares,
+        basis=basis,
+        end_share_value=0,
+        dividends=dividends,
+        gain=proceeds,
+        gain_pct=proceeds / basis * 100,
+    )
 
 
 def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) -> list:
@@ -482,8 +508,8 @@ def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) ->
     Assume we start with $100,000 in the given stock.  Sell the same number of
     dollars of stock until we either run out of months or shares.
     """
-    dividends = 0
-    proceeds = 0
+    dividends = 0.0
+    proceeds = 0.0
 
     # Need first and last date we could have bought shares, which might not be
     # start_date and end_date.  We need both stock and CPI data for all dates.
@@ -492,7 +518,8 @@ def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) ->
     first_sell_date = max(cpi_start, min(prices.keys()))
     last_sell_date = min(cpi_end, max(prices.keys()))
 
-    start_shares = 100000 / prices[first_sell_date].get_price(
+    basis = 100000.0
+    start_shares = basis / prices[first_sell_date].get_price(
         StockPrice.Price.ADJUSTED_CLOSE
     )
     shares = start_shares
@@ -521,17 +548,17 @@ def simulate_selling_constant_dollars(s: str, prices: dict[date, StockPrice]) ->
             last_sell_date = sell_date
             break
 
-    return [
-        s.upper(),
-        first_sell_date,
-        last_sell_date,
-        start_shares,
-        0,
-        shares * prices[last_sell_date].transaction_price(),
-        dividends,
-        proceeds,
-        0,
-    ]
+    return SimResult(
+        symbol=s.upper(),
+        first_buy_date=first_sell_date,
+        last_buy_date=last_sell_date,
+        shares=start_shares,
+        basis=100000.0,
+        end_share_value=shares * prices[last_sell_date].transaction_price(),
+        dividends=dividends,
+        gain=proceeds,
+        gain_pct=0,
+    )
 
 
 def parse_args() -> None:
