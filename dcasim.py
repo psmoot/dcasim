@@ -226,13 +226,14 @@ def fetch_data(url: str, pickle_name: str) -> dict[str, str]:
     """
     pickle_file_path = Path(f"./.cache/{pickle_name}.pkl")
     global at_api_limit
+    age_limit = ONE_MONTH_SECS * 3
 
     if pickle_file_path.exists():  # noqa: SIM108
         age = time.time() - pickle_file_path.stat().st_mtime
     else:
-        age = ONE_MONTH_SECS + 1
+        age = age_limit + 1
 
-    if pickle_file_path.exists() and age <= ONE_MONTH_SECS:
+    if pickle_file_path.exists() and age <= age_limit:
         logger.info(f"Loading data for {pickle_name} from {pickle_file_path}.")
         with pickle_file_path.open(mode="rb") as pkl_fp:
             data = load(pkl_fp)  # noqa: S301
@@ -309,6 +310,11 @@ def load_stock_values(ticker_symbol: str) -> Dict[date, StockPrice]:
             continue
 
         prices[price_date] = StockPrice(price_date, v)
+
+    # Check whether any prices were within the simulation time range.
+    if len(prices) == 0:
+        logger.warning(f"No sales data for {ticker_symbol} in simulation time range.")
+        return None
 
     return prices
 
@@ -663,6 +669,10 @@ def main() -> None:
         except ValueError:  # noqa: PERF203
             logger.warning("Symbol {symbol} isn't a valid stock symbol, skipping.")
             continue
+
+    if len(share_prices) == 0:
+        logger.warning("Did not load any share prices.")
+        return
 
     output = simulate(share_prices)
     print(f"At end of {args.action} simulation from {start_date} to {end_date}")
